@@ -583,29 +583,6 @@ wheels = [
 ]
 
 [[package]]
-name = "jupyter-mcp"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "ipykernel" },
-    { name = "jupyter-client" },
-    { name = "mcp", extra = ["cli"] },
-    { name = "nbformat" },
-    { name = "requests" },
-    { name = "websocket-client" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "ipykernel", specifier = ">=6.0.0" },
-    { name = "jupyter-client", specifier = ">=8.6.0" },
-    { name = "mcp", extras = ["cli"], specifier = ">=1.1.0" },
-    { name = "nbformat", specifier = ">=5.9.0" },
-    { name = "requests", specifier = ">=2.31.0" },
-    { name = "websocket-client", specifier = ">=1.6.0" },
-]
-
-[[package]]
 name = "markdown-it-py"
 version = "4.0.0"
 source = { registry = "https://pypi.org/simple" }
@@ -658,6 +635,29 @@ wheels = [
 cli = [
     { name = "python-dotenv" },
     { name = "typer" },
+]
+
+[[package]]
+name = "mcp-jupyter-server"
+version = "0.1.1"
+source = { editable = "." }
+dependencies = [
+    { name = "ipykernel" },
+    { name = "jupyter-client" },
+    { name = "mcp", extra = ["cli"] },
+    { name = "nbformat" },
+    { name = "requests" },
+    { name = "websocket-client" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "ipykernel", specifier = ">=6.0.0" },
+    { name = "jupyter-client", specifier = ">=8.6.0" },
+    { name = "mcp", extras = ["cli"], specifier = ">=1.1.0" },
+    { name = "nbformat", specifier = ">=5.9.0" },
+    { name = "requests", specifier = ">=2.31.0" },
+    { name = "websocket-client", specifier = ">=1.6.0" },
 ]
 
 [[package]]
