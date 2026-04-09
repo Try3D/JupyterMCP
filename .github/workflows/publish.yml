@@ -1,24 +1,22 @@
 name: Publish to PyPI
 
 on:
-  release:
-    types: [published]
+  push:
+    tags: ['v*']
 
 jobs:
-  build-and-publish:
+  publish:
     runs-on: ubuntu-latest
-    environment: pypi
-    permissions:
-      id-token: write
-
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@v4
+      - uses: astral-sh/setup-uv@v3
 
-      - name: Build
-        run: uv build
+      - run: uv run python -m build
 
-      - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+      - run: uv run twine upload dist/*
+        env:
+          TWINE_USERNAME: __token__
+          TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
