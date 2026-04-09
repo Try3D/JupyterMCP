@@ -6,12 +6,13 @@ import sys
 from mcp.server.fastmcp import FastMCP
 
 from .executor import CellExecutor
-from .kernel_manager import KernelRegistry
+from .kernel_manager import DelegatingKernelRegistry, KernelRegistry
 from .notebook_manager import NotebookManager
 from .tools.cells import register_cell_tools
 from .tools.execution import register_execution_tools
 from .tools.kernel import register_kernel_tools
 from .tools.notebooks import register_notebook_tools
+from .tools.remote import register_remote_tools
 
 
 def _get_working_dir() -> str:
@@ -23,6 +24,23 @@ def _get_working_dir() -> str:
     return os.environ.get("CLAUDE_CODE_CWD") or os.getcwd()
 
 
+def _get_remote_config() -> tuple[str | None, str | None]:
+    """Get remote server URL and token from --remote-url/--remote-token args or env vars."""
+    url = None
+    token = None
+    if "--remote-url" in sys.argv:
+        idx = sys.argv.index("--remote-url")
+        if idx + 1 < len(sys.argv):
+            url = sys.argv[idx + 1]
+    if "--remote-token" in sys.argv:
+        idx = sys.argv.index("--remote-token")
+        if idx + 1 < len(sys.argv):
+            token = sys.argv[idx + 1]
+    url = url or os.environ.get("JUPYTER_SERVER_URL")
+    token = token or os.environ.get("JUPYTER_SERVER_TOKEN", "")
+    return url, token
+
+
 def create_server():
     """Create and configure the MCP server."""
     working_dir = _get_working_dir()
@@ -32,7 +50,8 @@ def create_server():
         instructions=(
             "Manage Jupyter notebooks and execute Python code interactively. "
             "Notebooks are saved as .ipynb files. Kernel state (variables, imports) "
-            "persists between cell executions within the same session."
+            "persists between cell executions within the same session. "
+            "Use remote_connect to route kernel execution to a remote Jupyter Server."
         ),
     )
 
@@ -40,15 +59,19 @@ def create_server():
     _session_state = {"working_dir": working_dir}
 
     notebook_mgr = NotebookManager(working_dir=working_dir)
-    kernel_reg = KernelRegistry()
+    kernel_reg = DelegatingKernelRegistry(local=KernelRegistry())
     executor = CellExecutor(kernel_registry=kernel_reg)
 
+    # Connect to remote server at startup if configured
+    remote_url, remote_token = _get_remote_config()
+    if remote_url:
+        from .remote_kernel_manager import RemoteKernelRegistry
+        kernel_reg.set_remote(RemoteKernelRegistry(server_url=remote_url, token=remote_token or ""))
+
     def _get_current_working_dir() -> str:
-        """Get the current session working directory."""
         return _session_state["working_dir"]
 
     def _set_notebook_manager_dir(path: str) -> None:
-        """Update the notebook manager's working directory."""
         _session_state["working_dir"] = path
         notebook_mgr.working_dir = path
 
@@ -57,6 +80,7 @@ def create_server():
     register_cell_tools(mcp, notebook_mgr)
     register_execution_tools(mcp, notebook_mgr, kernel_reg, executor)
     register_kernel_tools(mcp, notebook_mgr, kernel_reg)
+    register_remote_tools(mcp, kernel_reg)
 
     return mcp
 

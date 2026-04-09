@@ -137,3 +137,59 @@ class KernelRegistry:
         paths = list(self._kernels.keys())
         for path in paths:
             self.shutdown(path)
+
+
+class DelegatingKernelRegistry:
+    """Proxies kernel operations to either the local or a remote registry.
+
+    Swap registries at runtime via set_remote / clear_remote without touching
+    CellExecutor or any tool registration code.
+    """
+
+    def __init__(self, local: KernelRegistry):
+        self._local = local
+        self._remote = None
+
+    def set_remote(self, remote) -> None:
+        self._remote = remote
+
+    def clear_remote(self) -> None:
+        if self._remote is not None:
+            self._remote.cleanup_all()
+        self._remote = None
+
+    def has_remote(self) -> bool:
+        return self._remote is not None
+
+    def remote_url(self) -> str | None:
+        if self._remote is not None:
+            return self._remote._server_url
+        return None
+
+    @property
+    def _active(self):
+        return self._remote if self._remote is not None else self._local
+
+    def get_or_start(self, notebook_path: str, python_path: str | None = None):
+        return self._active.get_or_start(notebook_path, python_path)
+
+    def shutdown(self, notebook_path: str) -> None:
+        return self._active.shutdown(notebook_path)
+
+    def restart(self, notebook_path: str, python_path: str | None = None) -> str:
+        return self._active.restart(notebook_path, python_path)
+
+    def interrupt(self, notebook_path: str) -> None:
+        return self._active.interrupt(notebook_path)
+
+    def is_alive(self, notebook_path: str) -> bool:
+        return self._active.is_alive(notebook_path)
+
+    def get_status(self, notebook_path: str) -> dict:
+        return self._active.get_status(notebook_path)
+
+    def get_entry(self, notebook_path: str):
+        return self._active.get_entry(notebook_path)
+
+    def cleanup_all(self) -> None:
+        return self._active.cleanup_all()
