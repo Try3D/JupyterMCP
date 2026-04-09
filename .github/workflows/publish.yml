@@ -15,9 +15,9 @@ jobs:
 
       - uses: astral-sh/setup-uv@v3
 
-      - run: uv run python -m build
+      - run: uv build
 
-      - run: uv run twine upload dist/*
+      - run: uv run --with twine twine upload dist/*
         env:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
