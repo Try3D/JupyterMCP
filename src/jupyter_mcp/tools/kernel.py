@@ -2,14 +2,14 @@
 
 from mcp.server.fastmcp import FastMCP
 
-from ..kernel_manager import KernelRegistry
+from ..kernel_manager import DelegatingKernelRegistry
 from ..notebook_manager import NotebookManager
 
 
 def register_kernel_tools(
     mcp: FastMCP,
     notebook_mgr: NotebookManager,
-    kernel_reg: KernelRegistry,
+    kernel_reg: DelegatingKernelRegistry,
 ):
     """Register kernel management tools with the MCP server."""
 
@@ -60,3 +60,38 @@ def register_kernel_tools(
         path = notebook_mgr._path(name)
         info = kernel_reg.get_status(path)
         return {"success": True, "notebook": name, **info}
+
+    @mcp.tool(
+        annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False}
+    )
+    def kernel_start(name: str, python_path: str = "") -> dict:
+        """
+        Shut down any existing kernel for this notebook and start a completely
+        fresh one. Unlike kernel_restart, this always creates a new kernel
+        process from scratch — even if the Python interpreter is unchanged.
+        Use this at session start to enforce a specific Python environment,
+        or to guarantee a clean slate.
+
+        python_path: which Python to use for the new kernel.
+        - "" or omitted: uses the server's own Python (sys.executable)
+        - Absolute path: e.g. "/home/user/project/.venv/bin/python"
+        - Name on PATH: e.g. "python3.11"
+        Not supported when connected to a remote server (use remote_connect to
+        select the server; the remote server controls the interpreter).
+        """
+        try:
+            path = notebook_mgr._path(name)
+            resolved = kernel_reg.start(path, python_path=python_path or None)
+            return {"success": True, "message": f"Kernel for '{name}' started fresh", "python_path": resolved}
+        except Exception as e:
+            return {"success": False, "error": f"Failed to start kernel: {e}"}
+
+    @mcp.tool(annotations={"readOnlyHint": True})
+    def kernel_list() -> dict:
+        """
+        List all kernels currently tracked in this session, with their status
+        (idle/dead) and Python interpreter path. Only kernels started during
+        this MCP session are listed.
+        """
+        kernels = kernel_reg.list_kernels()
+        return {"success": True, "kernels": kernels, "count": len(kernels)}

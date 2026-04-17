@@ -1,6 +1,7 @@
 """Remote Jupyter kernel management via Jupyter Server REST API and WebSocket."""
 
 import json
+import logging
 import threading
 import time
 import uuid
@@ -10,6 +11,8 @@ from queue import Empty, Queue
 
 import requests
 import websocket
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -38,6 +41,7 @@ class RemoteBlockingClient:
         self._thread: threading.Thread | None = None
         self._connected = threading.Event()
         self._session_id = str(uuid.uuid4())
+        self._error: str | None = None
 
     def start_channels(self):
         self._ws = websocket.WebSocketApp(
@@ -64,7 +68,8 @@ class RemoteBlockingClient:
     def is_connected(self) -> bool:
         return self._connected.is_set()
 
-    def wait_for_ready(self, timeout: float = 30.0):
+    def wait_for_ready(self, timeout: float = 30.0) -> dict:
+        """Wait for kernel to be ready. Returns language_info from kernel_info_reply."""
         msg_id = self._send("shell", "kernel_info_request", {})
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -75,7 +80,7 @@ class RemoteBlockingClient:
                     msg["header"]["msg_type"] == "kernel_info_reply"
                     and msg.get("parent_header", {}).get("msg_id") == msg_id
                 ):
-                    return
+                    return msg.get("content", {}).get("language_info", {})
             except Empty:
                 continue
         raise TimeoutError(f"Remote kernel not ready within {timeout}s")
@@ -91,6 +96,8 @@ class RemoteBlockingClient:
         })
 
     def get_iopub_msg(self, timeout: float = -1) -> dict:
+        if self._error is not None:
+            raise ConnectionError(f"WebSocket connection lost: {self._error}")
         t = None if timeout == -1 else timeout
         try:
             return self._iopub_queue.get(timeout=t)
@@ -98,6 +105,8 @@ class RemoteBlockingClient:
             raise Empty()
 
     def get_shell_msg(self, timeout: float = -1) -> dict:
+        if self._error is not None:
+            raise ConnectionError(f"WebSocket connection lost: {self._error}")
         t = None if timeout == -1 else timeout
         try:
             return self._shell_queue.get(timeout=t)
@@ -139,10 +148,16 @@ class RemoteBlockingClient:
             self._shell_queue.put(msg)
 
     def _on_error(self, ws, error):
-        pass
+        self._error = str(error)
+        logger.error("WebSocket error for %s: %s", self._ws_url, error)
+        self._connected.clear()
 
     def _on_close(self, ws, close_status_code, close_msg):
         self._connected.clear()
+        if close_status_code and close_status_code not in (1000, 1001):
+            if self._error is None:
+                self._error = f"WebSocket closed unexpectedly: code={close_status_code} msg={close_msg}"
+            logger.warning("WebSocket closed: %s: code=%s msg=%s", self._ws_url, close_status_code, close_msg)
 
 
 class RemoteKernelRegistry:
@@ -159,7 +174,8 @@ class RemoteKernelRegistry:
         self._kernels: dict[str, RemoteKernelEntry] = {}
         self._global_lock = threading.Lock()
         self._session = requests.Session()
-        self._session.headers["Authorization"] = f"token {token}"
+        if token:
+            self._session.headers["Authorization"] = f"token {token}"
 
     def verify_connection(self) -> None:
         """Raise if the remote server is unreachable or auth fails."""
@@ -178,16 +194,26 @@ class RemoteKernelRegistry:
                     pass
             return self._start_locked(notebook_path)
 
-    def _start_locked(self, notebook_path: str) -> RemoteKernelEntry:
+    def _start_locked(self, notebook_path: str) -> "RemoteKernelEntry":
         resp = self._session.post(f"{self._server_url}/api/kernels", json={})
         resp.raise_for_status()
-        kernel_id = resp.json()["id"]
+        kernel_data = resp.json()
+        kernel_id = kernel_data["id"]
 
         client = RemoteBlockingClient(self._kernel_ws_url(kernel_id))
         client.start_channels()
-        client.wait_for_ready(timeout=30)
+        language_info = client.wait_for_ready(timeout=30)
 
-        entry = RemoteKernelEntry(kernel_id=kernel_id, client=client)
+        python_version = language_info.get("version", "")
+        kernel_name = kernel_data.get("name", "")
+        if python_version:
+            python_path = f"remote:{kernel_name}:{python_version}" if kernel_name else f"remote:python:{python_version}"
+        elif kernel_name:
+            python_path = f"remote:{kernel_name}"
+        else:
+            python_path = "remote"
+
+        entry = RemoteKernelEntry(kernel_id=kernel_id, client=client, python_path=python_path)
         self._kernels[notebook_path] = entry
         return entry
 
@@ -223,12 +249,15 @@ class RemoteKernelRegistry:
                 )
                 new_client = RemoteBlockingClient(self._kernel_ws_url(entry.kernel_id))
                 new_client.start_channels()
-                new_client.wait_for_ready(timeout=30)
+                language_info = new_client.wait_for_ready(timeout=30)
                 entry.client = new_client
+                python_version = language_info.get("version", "")
+                if python_version:
+                    entry.python_path = f"remote:python:{python_version}"
             except Exception:
                 self._kernels.pop(notebook_path, None)
                 return self._start_locked(notebook_path).python_path
-        return "remote"
+        return entry.python_path
 
     def interrupt(self, notebook_path: str) -> None:
         entry = self._kernels.get(notebook_path)
@@ -251,8 +280,36 @@ class RemoteKernelRegistry:
         if entry is None:
             return {"status": "not_started", "python_path": None}
         if not entry.is_alive():
-            return {"status": "dead", "python_path": "remote"}
-        return {"status": "idle", "python_path": "remote"}
+            return {"status": "dead", "python_path": entry.python_path}
+        return {"status": "idle", "python_path": entry.python_path}
+
+    def start(self, notebook_path: str, python_path: str | None = None) -> str:
+        """Always tear down any existing remote kernel and start a fresh one.
+        python_path is not supported for remote kernels and must be None."""
+        if python_path is not None:
+            raise ValueError("python_path is not supported for remote kernels; the remote server controls the interpreter")
+        with self._global_lock:
+            entry = self._kernels.pop(notebook_path, None)
+            if entry is not None:
+                try:
+                    entry.client.stop_channels()
+                    self._session.delete(f"{self._server_url}/api/kernels/{entry.kernel_id}")
+                except Exception:
+                    pass
+            return self._start_locked(notebook_path).python_path
+
+    def list_kernels(self) -> list[dict]:
+        """Return all tracked remote kernels with their status and python path."""
+        with self._global_lock:
+            return [
+                {
+                    "notebook": p,
+                    "status": "idle" if e.is_alive() else "dead",
+                    "python_path": e.python_path,
+                    "kernel_id": e.kernel_id,
+                }
+                for p, e in self._kernels.items()
+            ]
 
     def get_entry(self, notebook_path: str) -> RemoteKernelEntry | None:
         return self._kernels.get(notebook_path)
